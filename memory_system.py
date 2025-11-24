@@ -15,7 +15,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 from fastapi import Request
@@ -54,7 +54,7 @@ class Constants:
     LLM_RERANKING_TRIGGER_MULTIPLIER = 0.8  # Multiplier for LLM reranking trigger threshold
 
     # Skip Detection
-    SKIP_CATEGORY_MARGIN = 0.10  # Margin above personal similarity for skip category classification
+    SKIP_CATEGORY_MARGIN = 0.20  # Margin above personal similarity for skip category classification
     DEDUPLICATION_SIMILARITY_THRESHOLD = 0.90  # Similarity threshold for deduplication checks
 
     # Safety & Operations
@@ -63,6 +63,18 @@ class Constants:
 
     # Content Display
     CONTENT_PREVIEW_LENGTH = 100  # Maximum length for content preview display
+
+    # Status Emit Levels
+    STATUS_LEVEL_BASIC = 0  # Maps to "Basic" - Show only summary counts
+    STATUS_LEVEL_INTERMEDIATE = 1  # Maps to "Intermediate" - Show summaries and key details
+    STATUS_LEVEL_DETAILED = 2  # Maps to "Detailed" - Show everything including full diagnostics
+
+    # Mapping from enum string values to numeric levels for comparison
+    STATUS_LEVEL_MAP = {
+        "Basic": 0,
+        "Intermediate": 1,
+        "Detailed": 2,
+    }
 
 
 class Prompts:
@@ -191,6 +203,13 @@ Explanation: Query seeks general technical explanation without personal context.
 class Models:
     """Container for all Pydantic models used in the memory system."""
 
+    class StatusEmitLevel(str, Enum):
+        """Verbosity levels for status message emission - selectable as dropdown with title case strings."""
+
+        BASIC = "Basic"
+        INTERMEDIATE = "Intermediate"
+        DETAILED = "Detailed"
+
     class MemoryOperationType(Enum):
         CREATE = "CREATE"
         UPDATE = "UPDATE"
@@ -254,6 +273,7 @@ class UnifiedCacheManager:
         self.EMBEDDING_CACHE = "embedding"
         self.RETRIEVAL_CACHE = "retrieval"
         self.MEMORY_CACHE = "memory"
+        self.SKIP_STATE_CACHE = "skip"
 
     async def get(self, user_id: str, cache_type: str, key: str) -> Optional[Any]:
         """Get value from cache with LRU updates."""
@@ -332,9 +352,12 @@ class SkipDetector:
 
     NON_PERSONAL_CATEGORY_DESCRIPTIONS = [
         # --- Abstract Knowledge & Creative Tasks ---
-        "General knowledge questions about **impersonal, academic, or abstract topics** like geography, history, trivia, theoretical science, or definitions. 'What is the capital of France?', 'Who was the 1st president?', 'Explain quantum physics', 'Define photosynthesis.'",
-        "Creative writing prompts, requests for jokes, poems, or fictional stories. 'Write a poem about a tree', 'Generate a story where...', 'Draft a marketing email for a fake product.'",
-        "Requests for generic lists, outlines, or brainstorming on impersonal topics. 'Give me 10 ideas for a sci-fi movie', 'Brainstorm names for a tech company', 'Create an outline for an essay on the Roman Empire.'",
+        "General knowledge questions about **impersonal, academic, or abstract topics** like geography, world history, trivia, theoretical science, or definitions. 'What is the capital of France?', 'Who was the 1st president?', 'Explain quantum physics'.",
+        "General knowledge explanations of concepts, mechanisms, or processes. 'Define photosynthesis', 'How does a combustion engine work?', 'Explain how blockchain technology operates', 'What is the theory of relativity?', 'Describe DNA replication'.",
+        "Creative writing prompts, requests for jokes, poems, fictional stories, or content generation. 'Write a poem about a tree', 'Generate a story where...', 'Draft a marketing email for a fake product', 'Create a character backstory', 'Write a song'.",
+        "Requests for generic recommendations, lists, outlines, or brainstorming on impersonal topics without personal context. 'Give me 10 ideas for a sci-fi movie', 'Brainstorm names for a tech company', 'Create an outline for an essay on Rome'.",
+        "Requests for advice, suggestions, or recommendations where the PRIMARY INTENT is to get help or information, even if personal context is mentioned. 'What should I give my daughter for her birthday?', 'Can you recommend restaurants in my city?'.",
+        "Seeking recommendations or help with personal decisions where the question is the focus, not stating facts. 'What are good honeymoon destinations?', 'Help me choose between job offers', 'What car should I buy for my commute?', 'Which laptop is best?'.",
         # --- Technical: Code & Programming ---
         "programming language syntax, data types like string or integer, algorithm logic, function, method, programming class, object-oriented paradigm, variable scope, control flow, import, module, package, library, framework, recursion, iteration",
         "software design patterns, creational: singleton, factory, builder; structural: adapter, decorator, facade, proxy; behavioral: observer, strategy, command, mediator, chain of responsibility; abstract interface, polymorphism, composition",
@@ -392,29 +415,39 @@ class SkipDetector:
         "translate this informal or slang expression to its colloquial equivalent in Spanish. How would you say 'What's up?' in Japanese in a casual context? This request focuses on capturing the correct tone and nuance of informal language.",
         "provide the formal and professional translation for 'Please find the attached document for your review' in French. Translate this business email phrase to German, ensuring the terminology and register are appropriate for a corporate context.",
         # --- Instructional: Proofreading & Editing ---
-        "proofread the following text for errors. Here is my draft, please check it for typos and mistakes: 'Teh quick brown fox jumpped'. Review, revise, and correct any misspellings or grammatical issues you find in the provided passage.",
-        "correct the grammar in this sentence: 'She don't like it'. Resolve grammatical issues like subject-verb agreement, incorrect verb tense, pronoun reference errors, or misplaced modifiers in the provided text. Address faulty sentence structure.",
-        "check the spelling and punctuation in this passage. Please review the following text and correct any textual errors: 'its a beautiful day, isnt it'. Amend mistakes with commas, periods, apostrophes, quotation marks, colons, or capitalization.",
-        "review this sentence and tell me if it is grammatically correct. Is the sentence 'There going to they're house' proper? Validate the grammar, check word usage (like their/there/they're), and verify that the sentence is well-formed.",
-        "proofread my email before I send it. Here is the draft. Please check for clarity, flow, coherence, and readability. Improve my writing, make it better, and polish the text to ensure it sounds professional and is free of textual errors.",
-        "fix the punctuation in this run-on sentence or comma splice. Correct sentence fragments and ensure proper use of capitalization. Address errors with apostrophes, quotation marks, periods, semicolons, dashes, and other punctuation marks.",
-        "suggest a better word choice or alternative phrasing. Can you help me improve my vocabulary and diction in this sentence? Replace words with more precise or impactful synonyms. Refine the expression for better clarity, tone, or style.",
-        "rewrite this sentence from passive voice to active voice. Help me make my writing more direct and concise by eliminating passive constructions. Restructure the sentence to be more engaging and clear. Identify and fix faulty parallelism.",
-        "improve the clarity and flow of this paragraph. Make the writing smoother and more readable. Restructure the sentences for better coherence and logical progression. Ensure the ideas connect seamlessly and eliminate any awkward phrasing.",
-        "check my essay for conciseness and remove any redundancy. Help me edit this text to be more direct and to the point. Identify and eliminate wordiness, filler words, and repetitive phrases to strengthen the overall quality of the writing.",
+        "proofread, review, revise, or edit provided text for errors. Here is my draft, check it for typos and mistakes. Correct grammar, spelling, punctuation. Review emails, essays, documents, reviews, or any submitted content for clarity and flow.",
+        "proofread for coherence, readability, or professionalism. Polish the text to ensure it sounds professional and is free of errors. Check for textual quality, sentence structure, and overall writing effectiveness in submitted drafts or passages.",
+        "correct grammatical issues like subject-verb agreement, incorrect verb tense, pronoun reference errors, misplaced modifiers, or faulty sentence structure. Validate if a sentence is grammatically correct. Check word usage (their/there/they're).",
+        "fix passive voice, run-on sentences, comma splices, or sentence fragments. Address punctuation errors with apostrophes, quotation marks, periods, semicolons, dashes. Ensure proper capitalization and resolve structural writing problems.",
+        "improve writing quality: suggest better word choice, alternative phrasing, synonyms, or refined expression. Enhance vocabulary and diction. Make writing more direct, concise, engaging, smooth, or readable. Restructure sentences for coherence.",
+        "remove wordiness, filler words, or redundancy from text. Improve logical progression of ideas. Eliminate awkward phrasing. Make the writing flow better and ensure ideas connect seamlessly for better overall quality and readability.",
+        "rewrite, rephrase, paraphrase, or reformulate text using different wording. Restate information in another way. Express the same meaning but with new structure or vocabulary. Adapt tone to be more formal, academic, or professional.",
+        "adapt writing tone to be more casual, friendly, or conversational. Change the register and voice to suit a specific audience or context level. Adjust the writing style while maintaining the core message and information presented in the original text.",
+        # --- Transient States & Momentary Situations ---
+        "describing current temporary emotional states, fleeting feelings, or momentary moods without lasting significance. 'I'm feeling stressed this week', 'I'm tired today', 'I'm excited right now', 'I'm frustrated at the moment', 'I'm happy'.",
+        "temporary emotions or passing states that are not enduring personal facts. 'I'm angry about this situation', 'I'm nervous about tomorrow', 'I feel great today', 'I'm worried right now'. These are transient feelings, not biographical information.",
+        "mentioning one-time events, temporary situations, or transient circumstances without lasting impact. 'I have a presentation on Friday', 'I'm at the store', 'I'm working late tonight', 'I ate pizza for lunch', 'It's raining here today'.",
+        "describing momentary situations, current locations, or immediate activities. 'I'm in a meeting', 'I'm driving to work', 'I'm cooking dinner', 'I'm watching a movie'. These are temporary circumstances, not biographical or lasting personal facts.",
     ]
 
     PERSONAL_CATEGORY_DESCRIPTIONS = [
-        "**Identity, Beliefs, & Background:** Stating or asking about my name, age, personality, core beliefs, values, religion, cultural background, education, or personal history.",
-        "**Health & Wellness:** Stating or asking about my medical conditions, diet, allergies, fitness routines, sleep habits, physical appearance, or mental well-being.",
-        "**Relationships & Social Life:** Stating or asking about my family, spouse, children, friends, romantic partners, pets, social activities, or community involvement.",
-        "**Career, Work, & Skills:** Stating or asking about my job, workplace, company, career path, professional skills, colleagues, or learning new skills for work.",
-        "**Finance & Legal:** Stating or asking about my personal finances, budgeting, investments, savings, debt, taxes, or personal legal situations.",
-        "**Home, Location, & Transport:** Stating or asking about my home, living situation, neighborhood, city/country, commute, or personal vehicles.",
-        "**Hobbies, Interests, & Media:** Stating or asking about my hobbies, pastimes, creative projects, sports, or my preferences for media like movies, books, music, or games.",
-        "**Plans, Goals, & Aspirations:** Stating or asking about my future plans, appointments, upcoming events, travel plans, or my long-term personal or professional goals.",
-        "**History & Personal Memories:** Stating or asking about my past life events, significant memories, personal anecdotes, or my travel history.",
-        "**Problems, Advice, & Opinions:** Stating my preferences/opinions (likes/dislikes) or asking for personalized advice, recommendations, or help with an everyday problem in any personal domain.",
+        "**Identity Core:** Directly stating facts about my name, birthdate, age, nationality, ethnicity, personality traits, core beliefs, values, religion, cultural background, education history, academic degrees, or formative personal experiences.",
+        "**Medical History:** Directly stating facts about my medical diagnoses, chronic conditions, past surgeries or medical procedures, medications I currently take or have taken in the past, supplements I use, vision or hearing conditions, allergies.",
+        "**Physical Health:** Directly stating facts about my dietary restrictions, physical measurements like height and weight, fitness routines, sleep patterns, physical appearance, mental health conditions, ongoing symptoms, or wellness practices I follow.",
+        "**Family & Relationships:** Directly stating facts about my family members including their names, ages, relationships to me, occupations, or health conditions. Information about my spouse, partner, children, friends, or romantic relationship status.",
+        "**Social & Pets:** Directly stating facts about my pets including their names and breeds, social activities I participate in, community involvement, or details about the people in my life and how I interact with my social circle and broader community.",
+        "**Job & Workplace:** Directly stating facts about my current or past job titles, employer names, workplace, industry, career transitions, professional certifications, technical skills I possess, colleagues, or work arrangements like remote or hybrid.",
+        "**Professional Growth:** Directly stating facts about professional development activities I'm engaged in or completed, training programs, career milestones, work history, or any facts related to my professional life, expertise, and career trajectory.",
+        "**Finance & Legal:** Directly stating facts about my financial situation, income level, budgeting constraints, investments I hold, savings goals, debts I have, tax situations, legal matters I'm involved in, or financial obligations and commitments.",
+        "**Home & Location:** Directly stating facts about my residence type, living arrangements, roommates, neighborhood, city, country, relocations I've made, commute details, vehicles I own or drive with make/model/year, or transportation methods I use.",
+        "**Hobbies & Activities:** Directly stating facts about my hobbies, recreational activities, creative projects I work on, sports I play or follow, specific media preferences like favorite movies, books, music genres, games, or personal collections.",
+        "**Leisure & Entertainment:** Directly stating facts about pastimes I regularly engage in, entertainment preferences, artistic pursuits, leisure activities, or any facts about how I spend my free time and what I enjoy doing for relaxation or fulfillment.",
+        "**Future Plans:** Directly stating facts about my scheduled future plans, confirmed appointments, upcoming events I'm attending, booked travel itineraries, stated long-term personal goals, career aspirations, or life milestones I'm working toward.",
+        "**Life Events:** Directly stating facts about my past life events, significant personal milestones like graduations, marriages, or births, historical medical events, previous jobs or living situations, travel history, or memorable experiences.",
+        "**Personal History:** Directly stating facts about memorable personal experiences with temporal context, past achievements, formative moments, historical facts about my life journey, or biographical information about my past that shaped who I am.",
+        "**Emotional Landscape:** Directly stating my current emotional state toward lasting situations, not momentary feelings. My attitudes toward specific people or relationships, deep-seated preferences, strong aversions or dislikes, or motivations.",
+        "**Inner Life:** Directly stating facts about sources of stress or joy in my life, ongoing emotional experiences, persistent feelings about important matters, or enduring attitudes and perspectives that reflect my emotional landscape and inner life.",
+        "**Possessions & Brands:** Directly stating facts about specific items I own like devices, appliances, or vehicles with details. Products I regularly use or consume, brands I prefer, subscriptions I have, or material possessions with identifying details.",
     ]
 
     class SkipReason(Enum):
@@ -612,8 +645,9 @@ class SkipDetector:
             non_personal_similarities = np.dot(message_embedding, self._reference_embeddings["non_personal"].T)
             max_non_personal_similarity = float(non_personal_similarities.max())
 
-            threshold = max_personal_similarity + Constants.SKIP_CATEGORY_MARGIN
-            if (max_non_personal_similarity - max_personal_similarity) > Constants.SKIP_CATEGORY_MARGIN:
+            margin = memory_system.valves.skip_category_margin
+            threshold = max_personal_similarity + margin
+            if (max_non_personal_similarity - max_personal_similarity) > margin:
                 logger.info(f"🚫 Skipping: non-personal content (sim {max_non_personal_similarity:.3f} > {threshold:.3f})")
                 return self.SkipReason.SKIP_NON_PERSONAL.value
 
@@ -632,7 +666,7 @@ class LLMRerankingService:
         self.memory_system = memory_system
 
     def _should_use_llm_reranking(self, memories: List[Dict]) -> Tuple[bool, str]:
-        if not self.memory_system.valves.enable_llm_reranking:
+        if self.memory_system.valves.llm_reranking_trigger_multiplier <= 0:
             return False, "LLM reranking disabled"
 
         llm_trigger_threshold = int(self.memory_system.valves.max_memories_returned * self.memory_system.valves.llm_reranking_trigger_multiplier)
@@ -709,6 +743,7 @@ CANDIDATE MEMORIES:
                 emitter,
                 f"🤖 LLM Analyzing {len(llm_candidates)} Memories for Relevance",
                 done=False,
+                level=Constants.STATUS_LEVEL_INTERMEDIATE,
             )
             logger.info(f"Using LLM reranking: {decision_reason}")
 
@@ -716,7 +751,9 @@ CANDIDATE MEMORIES:
 
             if not selected_memories:
                 logger.info("📭 No relevant memories after LLM analysis")
-                await self.memory_system._emit_status(emitter, f"📭 No Relevant Memories After LLM Analysis", done=True)
+                await self.memory_system._emit_status(
+                    emitter, f"📭 No Relevant Memories After LLM Analysis", done=True, level=Constants.STATUS_LEVEL_INTERMEDIATE
+                )
                 return selected_memories, analysis_info
         else:
             logger.info(f"Skipping LLM reranking: {decision_reason}")
@@ -729,6 +766,7 @@ CANDIDATE MEMORIES:
             emitter,
             f"🎯 {retrieval_method} Memory Retrieval Complete{duration_text}",
             done=True,
+            level=Constants.STATUS_LEVEL_DETAILED,
         )
         return selected_memories, analysis_info
 
@@ -747,25 +785,20 @@ class LLMConsolidationService:
         if not existing_memories:
             return None
 
-        try:
-            content_embedding = await self.memory_system._generate_embeddings(content, user_id)
+        content_embedding = await self.memory_system._generate_embeddings(content, user_id)
 
-            for memory in existing_memories:
-                if not memory.content or len(memory.content.strip()) < Constants.MIN_MESSAGE_CHARS:
-                    continue
+        for memory in existing_memories:
+            if not memory.content or len(memory.content.strip()) < Constants.MIN_MESSAGE_CHARS:
+                continue
 
-                memory_embedding = await self.memory_system._generate_embeddings(memory.content, user_id)
+            memory_embedding = await self.memory_system._generate_embeddings(memory.content, user_id)
+            similarity = float(np.dot(content_embedding, memory_embedding))
 
-                similarity = float(np.dot(content_embedding, memory_embedding))
+            if similarity >= Constants.DEDUPLICATION_SIMILARITY_THRESHOLD:
+                logger.info(f"🔍 Semantic duplicate detected: similarity={similarity:.3f} with memory {memory.id}")
+                return str(memory.id)
 
-                if similarity >= Constants.DEDUPLICATION_SIMILARITY_THRESHOLD:
-                    logger.info(f"🔍 Semantic duplicate detected: similarity={similarity:.3f} with memory {memory.id}")
-                    return str(memory.id)
-
-            return None
-        except Exception as e:
-            logger.warning(f"⚠️ Semantic duplicate check failed: {str(e)}")
-            return None
+        return None
 
     def _filter_consolidation_candidates(self, similarities: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
         """Filter consolidation candidates by threshold and return candidates with threshold info."""
@@ -853,7 +886,7 @@ class LLMConsolidationService:
             )
         except Exception as e:
             logger.warning(f"🤖 LLM consolidation failed during memory processing: {str(e)}")
-            await self.memory_system._emit_status(emitter, f"⚠️ Memory Consolidation Failed", done=True)
+            await self.memory_system._emit_status(emitter, f"⚠️ Memory Consolidation Failed", done=True, level=Constants.STATUS_LEVEL_BASIC)
             return []
 
         operations = response.ops
@@ -945,21 +978,13 @@ class LLMConsolidationService:
 
     async def execute_memory_operations(self, operations: List[Dict[str, Any]], user_id: str, emitter: Optional[Callable] = None) -> Tuple[int, int, int, int]:
         """Execute consolidation operations with simplified tracking."""
-        if not operations or not user_id:
+        if not operations:
             return 0, 0, 0, 0
 
-        try:
-            user = await asyncio.wait_for(
-                asyncio.to_thread(Users.get_user_by_id, user_id),
-                timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"⏱️ User lookup timed out after {Constants.DATABASE_OPERATION_TIMEOUT_SEC}s")
-        except Exception as e:
-            raise RuntimeError(f"👤 User lookup failed: {str(e)}")
-
-        if not user:
-            raise ValueError(f"👤 User not found for consolidation: {user_id}")
+        user = await asyncio.wait_for(
+            asyncio.to_thread(Users.get_user_by_id, user_id),
+            timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
+        )
 
         created_count = updated_count = deleted_count = failed_count = 0
 
@@ -982,28 +1007,21 @@ class LLMConsolidationService:
 
         memory_contents_for_deletion = {}
         if operations_by_type["DELETE"]:
-            try:
-                user_memories = await self.memory_system._get_user_memories(user_id)
-                memory_contents_for_deletion = {str(mem.id): mem.content for mem in user_memories}
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to fetch memories for DELETE preview: {str(e)}")
+            user_memories = await self.memory_system._get_user_memories(user_id)
+            memory_contents_for_deletion = {str(mem.id): mem.content for mem in user_memories}
 
         if operations_by_type["CREATE"] or operations_by_type["UPDATE"]:
-            try:
-                current_memories = await self.memory_system._get_user_memories(user_id)
+            current_memories = await self.memory_system._get_user_memories(user_id)
 
-                if operations_by_type["CREATE"]:
-                    operations_by_type["CREATE"] = await self._deduplicate_operations(
-                        operations_by_type["CREATE"], current_memories, user_id, operation_type="CREATE"
-                    )
+            if operations_by_type["CREATE"]:
+                operations_by_type["CREATE"] = await self._deduplicate_operations(
+                    operations_by_type["CREATE"], current_memories, user_id, operation_type="CREATE"
+                )
 
-                if operations_by_type["UPDATE"]:
-                    operations_by_type["UPDATE"] = await self._deduplicate_operations(
-                        operations_by_type["UPDATE"], current_memories, user_id, operation_type="UPDATE", delete_operations=operations_by_type["DELETE"]
-                    )
-
-            except Exception as e:
-                logger.warning(f"⚠️ Semantic deduplication check failed, proceeding with original operations: {str(e)}")
+            if operations_by_type["UPDATE"]:
+                operations_by_type["UPDATE"] = await self._deduplicate_operations(
+                    operations_by_type["UPDATE"], current_memories, user_id, operation_type="UPDATE", delete_operations=operations_by_type["DELETE"]
+                )
 
         for operation_type, ops in operations_by_type.items():
             if not ops:
@@ -1014,38 +1032,33 @@ class LLMConsolidationService:
                 task = self.memory_system._execute_single_operation(operation, user)
                 batch_tasks.append(task)
 
-            try:
-                results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    operation = ops[idx]
+            results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            for idx, result in enumerate(results):
+                operation = ops[idx]
 
-                    if isinstance(result, Exception):
-                        failed_count += 1
-                        await self.memory_system._emit_status(emitter, f"❌ Failed {operation_type}", done=False)
-                    elif result == Models.MemoryOperationType.CREATE.value:
-                        created_count += 1
-                        content_preview = self.memory_system._truncate_content(operation.content)
-                        await self.memory_system._emit_status(emitter, f"📝 Created: {content_preview}", done=False)
-                    elif result == Models.MemoryOperationType.UPDATE.value:
-                        updated_count += 1
-                        content_preview = self.memory_system._truncate_content(operation.content)
-                        await self.memory_system._emit_status(emitter, f"✏️ Updated: {content_preview}", done=False)
-                    elif result == Models.MemoryOperationType.DELETE.value:
-                        deleted_count += 1
-                        content_preview = memory_contents_for_deletion.get(operation.id, operation.id)
-                        if content_preview and content_preview != operation.id:
-                            content_preview = self.memory_system._truncate_content(content_preview)
-                        await self.memory_system._emit_status(emitter, f"🗑️ Deleted: {content_preview}", done=False)
-                    elif result in [
-                        Models.OperationResult.FAILED.value,
-                        Models.OperationResult.UNSUPPORTED.value,
-                    ]:
-                        failed_count += 1
-                        await self.memory_system._emit_status(emitter, f"❌ Failed {operation_type}", done=False)
-            except Exception as e:
-                failed_count += len(ops)
-                logger.error(f"❌ Batch {operation_type} operations failed during memory consolidation: {str(e)}")
-                await self.memory_system._emit_status(emitter, f"❌ Batch {operation_type} Failed", done=False)
+                if isinstance(result, Exception):
+                    failed_count += 1
+                    await self.memory_system._emit_status(emitter, f"❌ Failed {operation_type}", done=False, level=Constants.STATUS_LEVEL_INTERMEDIATE)
+                elif result == Models.MemoryOperationType.CREATE.value:
+                    created_count += 1
+                    content_preview = self.memory_system._truncate_content(operation.content)
+                    await self.memory_system._emit_status(emitter, f"📝 Created: {content_preview}", done=False, level=Constants.STATUS_LEVEL_INTERMEDIATE)
+                elif result == Models.MemoryOperationType.UPDATE.value:
+                    updated_count += 1
+                    content_preview = self.memory_system._truncate_content(operation.content)
+                    await self.memory_system._emit_status(emitter, f"✏️ Updated: {content_preview}", done=False, level=Constants.STATUS_LEVEL_INTERMEDIATE)
+                elif result == Models.MemoryOperationType.DELETE.value:
+                    deleted_count += 1
+                    content_preview = memory_contents_for_deletion.get(operation.id, operation.id)
+                    if content_preview and content_preview != operation.id:
+                        content_preview = self.memory_system._truncate_content(content_preview)
+                    await self.memory_system._emit_status(emitter, f"🗑️ Deleted: {content_preview}", done=False, level=Constants.STATUS_LEVEL_INTERMEDIATE)
+                elif result in [
+                    Models.OperationResult.FAILED.value,
+                    Models.OperationResult.UNSUPPORTED.value,
+                ]:
+                    failed_count += 1
+                    await self.memory_system._emit_status(emitter, f"❌ Failed {operation_type}", done=False, level=Constants.STATUS_LEVEL_INTERMEDIATE)
 
         total_executed = created_count + updated_count + deleted_count
         logger.info(
@@ -1092,6 +1105,7 @@ class LLMConsolidationService:
                         emitter,
                         f"💾 Memory Consolidation Complete in {duration:.2f}s",
                         done=False,
+                        level=Constants.STATUS_LEVEL_DETAILED,
                     )
 
                     operation_details = self.memory_system._build_operation_details(created_count, updated_count, deleted_count)
@@ -1101,7 +1115,15 @@ class LLMConsolidationService:
                     if failed_count > 0:
                         operations_summary += f" (❌ {failed_count} Failed)"
 
-                    await self.memory_system._emit_status(emitter, operations_summary, done=True)
+                    await self.memory_system._emit_status(emitter, operations_summary, done=True, level=Constants.STATUS_LEVEL_BASIC)
+            else:
+                duration = time.time() - start_time
+                await self.memory_system._emit_status(
+                    emitter,
+                    f"✅ Consolidation Complete: No Updates Needed",
+                    done=True,
+                    level=Constants.STATUS_LEVEL_DETAILED,
+                )
 
         except Exception as e:
             duration = time.time() - start_time
@@ -1127,25 +1149,21 @@ class Filter:
             default=Constants.MAX_MEMORIES_PER_RETRIEVAL,
             description="Maximum number of memories to return in context",
         )
-        max_message_chars: int = Field(
-            default=Constants.MAX_MESSAGE_CHARS,
-            description="Maximum user message length before skipping memory operations",
-        )
         semantic_retrieval_threshold: float = Field(
             default=Constants.SEMANTIC_RETRIEVAL_THRESHOLD,
             description="Minimum similarity threshold for memory retrieval",
         )
-        relaxed_semantic_threshold_multiplier: float = Field(
-            default=Constants.RELAXED_SEMANTIC_THRESHOLD_MULTIPLIER,
-            description="Adjusts similarity threshold for memory consolidation (lower = more candidates)",
-        )
-        enable_llm_reranking: bool = Field(
-            default=True,
-            description="Enable LLM-based memory reranking for improved contextual selection",
-        )
         llm_reranking_trigger_multiplier: float = Field(
             default=Constants.LLM_RERANKING_TRIGGER_MULTIPLIER,
-            description="Controls when LLM reranking activates (lower = more aggressive)",
+            description="Controls when LLM reranking activates (0.0 = disabled, lower = more aggressive)",
+        )
+        skip_category_margin: float = Field(
+            default=Constants.SKIP_CATEGORY_MARGIN,
+            description="Margin above personal similarity for skip category classification (higher = more conservative skip detection)",
+        )
+        status_emit_level: Literal["Basic", "Intermediate", "Detailed"] = Field(
+            default="Intermediate",
+            description="Status message verbosity level: Basic (summary counts only), Intermediate (summaries and key details), Detailed (all details)",
         )
 
     def __init__(self):
@@ -1187,7 +1205,7 @@ class Filter:
                 self._embedding_function = __request__.app.state.EMBEDDING_FUNCTION
                 logger.info(f"✅ Using OpenWebUI's embedding function")
 
-                self._detect_embedding_dimension()
+                await self._detect_embedding_dimension()
 
                 if self._skip_detector is None:
                     global _SHARED_SKIP_DETECTOR_CACHE, _SHARED_SKIP_DETECTOR_CACHE_LOCK
@@ -1201,22 +1219,22 @@ class Filter:
                             self._skip_detector = _SHARED_SKIP_DETECTOR_CACHE[cache_key]
                         else:
                             logger.info(f"🤖 Initializing skip detector with OpenWebUI embeddings: {cache_key}")
-                            embedding_fn = self._embedding_function
-                            normalize_fn = self._normalize_embedding
-
+                            
                             def embedding_wrapper(
                                 texts: Union[str, List[str]],
                             ) -> Union[np.ndarray, List[np.ndarray]]:
-                                result = embedding_fn(texts, prefix=None, user=None)
+                                result = asyncio.get_event_loop().run_until_complete(
+                                    self._call_embedding_function(texts, prefix=None, user=None)
+                                )
                                 if isinstance(result, list):
                                     if isinstance(result[0], list):
-                                        return [normalize_fn(emb) for emb in result]
-                                    return np.array([normalize_fn(result)])
-                                return normalize_fn(result)
+                                        return [self._normalize_embedding(emb) for emb in result]
+                                    return np.array([self._normalize_embedding(result)])
+                                return self._normalize_embedding(result)
 
                             self._skip_detector = SkipDetector(embedding_wrapper)
                             _SHARED_SKIP_DETECTOR_CACHE[cache_key] = self._skip_detector
-                            logger.info(f"✅ Skip detector initialized and cached")
+                            logger.info(f"✅ Skip detector initialized and cached")                  
 
     def _truncate_content(self, content: str, max_length: Optional[int] = None) -> str:
         """Truncate content with ellipsis if needed."""
@@ -1227,7 +1245,7 @@ class Filter:
     def _get_retrieval_threshold(self, is_consolidation: bool = False) -> float:
         """Calculate retrieval threshold for semantic similarity filtering."""
         if is_consolidation:
-            return self.valves.semantic_retrieval_threshold * self.valves.relaxed_semantic_threshold_multiplier
+            return self.valves.semantic_retrieval_threshold * Constants.RELAXED_SEMANTIC_THRESHOLD_MULTIPLIER
         return self.valves.semantic_retrieval_threshold
 
     def _extract_text_from_content(self, content) -> str:
@@ -1264,16 +1282,59 @@ class Filter:
     def _compute_text_hash(self, text: str) -> str:
         """Compute SHA256 hash for text caching."""
         return hashlib.sha256(text.encode()).hexdigest()
+    
+    async def _call_embedding_function(
+        self, 
+        texts: Union[str, List[str]], 
+        prefix: Optional[str] = None, 
+        user: Optional[Any] = None
+    ) -> Union[List[float], List[List[float]]]:
+        """
+        Unified wrapper for calling the embedding function (sync or async).
+        Compatible with OpenWebUI 0.6.37+ where EMBEDDING_FUNCTION is asynchronous.
+        """
+        if self._embedding_function is None:
+            raise RuntimeError("Embedding function not initialized")
+        
+        if asyncio.iscoroutinefunction(self._embedding_function):
+            return await self._embedding_function(texts, prefix=prefix, user=user)
+        else:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, 
+                self._embedding_function, 
+                texts, 
+                prefix, 
+                user
+            )       
 
-    def _detect_embedding_dimension(self) -> None:
+    async def _detect_embedding_dimension(self) -> None:
         """Detect embedding dimension by generating a test embedding."""
         try:
-            test_embedding = self._embedding_function(["dummy"], prefix=None, user=None)
+            test_embedding = await self._call_embedding_function(
+                ["dummy"], 
+                prefix=None, 
+                user=None
+            )
+            
             if isinstance(test_embedding, list):
-                test_embedding = test_embedding[0]
-            self._embedding_dimension = np.squeeze(test_embedding).shape[0]
+                if len(test_embedding) > 0:
+                    first_elem = test_embedding[0]
+                    if isinstance(first_elem, list):
+                        test_embedding = first_elem
+                else:
+                    raise ValueError("Empty embedding returned")
+            
+            test_embedding = np.squeeze(test_embedding)
+            
+            if test_embedding.ndim != 1:
+                raise ValueError(f"Expected 1D embedding after squeeze, got shape {test_embedding.shape}")
+            
+            self._embedding_dimension = test_embedding.shape[0]
             logger.info(f"🎯 Detected embedding dimension: {self._embedding_dimension}")
+            
         except Exception as e:
+            logger.error(f"Failed to detect embedding dimension: {str(e)}")
             raise RuntimeError(f"Failed to detect embedding dimension: {str(e)}")
 
     def _normalize_embedding(self, embedding: Union[List[float], np.ndarray]) -> np.ndarray:
@@ -1294,18 +1355,14 @@ class Filter:
         norm = np.linalg.norm(embedding)
         return embedding / norm if norm > 0 else embedding
 
-    async def _generate_embeddings(self, texts: Union[str, List[str]], user_id: str) -> Union[np.ndarray, List[np.ndarray]]:
-        """Unified embedding generation for single text or batch with optimized caching using OpenWebUI's embedding function."""
-        if self._embedding_function is None:
-            raise RuntimeError("🤖 Embedding function not initialized. Ensure pipeline context is set.")
-
+    async def _generate_embeddings(
+        self, 
+        texts: Union[str, List[str]], 
+        user_id: str
+    ) -> Union[np.ndarray, List[np.ndarray]]:
+        """Unified embedding generation for single text or batch with optimized caching."""
         is_single = isinstance(texts, str)
         text_list = [texts] if is_single else texts
-
-        if not text_list:
-            if is_single:
-                raise ValueError("📏 Empty text provided for embedding generation")
-            return []
 
         result_embeddings = []
         uncached_texts = []
@@ -1315,7 +1372,7 @@ class Filter:
         for i, text in enumerate(text_list):
             if not text or len(str(text).strip()) < Constants.MIN_MESSAGE_CHARS:
                 if is_single:
-                    raise ValueError("📏 Text too short for embedding generation")
+                    raise ValueError("📝 Text too short for embedding generation")
                 result_embeddings.append(None)
                 continue
 
@@ -1333,8 +1390,11 @@ class Filter:
         if uncached_texts:
             user = await asyncio.to_thread(Users.get_user_by_id, user_id) if hasattr(self, "__user__") else None
 
-            loop = asyncio.get_event_loop()
-            raw_embeddings = await loop.run_in_executor(None, self._embedding_function, uncached_texts, None, user)
+            raw_embeddings = await self._call_embedding_function(
+                uncached_texts, 
+                prefix=None, 
+                user=user
+            )
 
             if isinstance(raw_embeddings, list) and len(raw_embeddings) > 0:
                 if isinstance(raw_embeddings[0], (list, np.ndarray)):
@@ -1356,14 +1416,14 @@ class Filter:
             return result_embeddings[0]
         else:
             valid_count = sum(1 for emb in result_embeddings if emb is not None)
-            logger.info(f"🚀 Batch embedding: {len(text_list) - len(uncached_texts)} cached, {len(uncached_texts)} new, {valid_count}/{len(text_list)} valid")
+            logger.info(
+                f"🚀 Batch embedding: {len(text_list) - len(uncached_texts)} cached, "
+                f"{len(uncached_texts)} new, {valid_count}/{len(text_list)} valid"
+            )
             return result_embeddings
 
     def _should_skip_memory_operations(self, user_message: str) -> Tuple[bool, str]:
-        if self._skip_detector is None:
-            raise RuntimeError("🤖 Skip detector not initialized")
-
-        skip_reason = self._skip_detector.detect_skip_reason(user_message, self.valves.max_message_chars, memory_system=self)
+        skip_reason = self._skip_detector.detect_skip_reason(user_message, Constants.MAX_MESSAGE_CHARS, memory_system=self)
         if skip_reason:
             status_key = SkipDetector.SkipReason(skip_reason)
             return True, SkipDetector.STATUS_MESSAGES[status_key]
@@ -1371,13 +1431,6 @@ class Filter:
 
     def _process_user_message(self, body: Dict[str, Any]) -> Tuple[Optional[str], bool, str]:
         """Extract user message and determine if memory operations should be skipped."""
-        if not body or "messages" not in body or not isinstance(body["messages"], list):
-            return (
-                None,
-                True,
-                SkipDetector.STATUS_MESSAGES[SkipDetector.SkipReason.SKIP_SIZE],
-            )
-
         messages = body["messages"]
         user_message = None
 
@@ -1421,10 +1474,6 @@ class Filter:
             return
 
         scores = [memory["relevance"] for memory in memories]
-
-        if not scores:
-            return
-
         top_score = max(scores)
         lowest_score = min(scores)
         median_score = statistics.median(scores)
@@ -1479,19 +1528,26 @@ class Filter:
             memory_lines.append(line)
         return memory_lines
 
-    async def _emit_status(self, emitter: Optional[Callable], description: str, done: bool = True) -> None:
-        """Emit status messages for memory operations."""
+    async def _emit_status(
+        self,
+        emitter: Optional[Callable],
+        description: str,
+        done: bool = True,
+        level: int = 1,
+    ) -> None:
+        """Emit status messages for memory operations based on configured verbosity level."""
         if not emitter:
             return
 
-        payload = {"type": "status", "data": {"description": description, "done": done}}
+        current_level_value = Constants.STATUS_LEVEL_MAP.get(self.valves.status_emit_level, 1)
 
-        try:
-            result = emitter(payload)
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception:
-            pass
+        if current_level_value < level:
+            return
+
+        payload = {"type": "status", "data": {"description": description, "done": done}}
+        result = emitter(payload)
+        if asyncio.iscoroutine(result):
+            await result
 
     async def _retrieve_relevant_memories(
         self,
@@ -1519,7 +1575,7 @@ class Filter:
 
         if not user_memories:
             logger.info("📭 No memories found for user")
-            await self._emit_status(emitter, "📭 No Memories Found", done=True)
+            await self._emit_status(emitter, "📭 No Memories Found", done=True, level=Constants.STATUS_LEVEL_INTERMEDIATE)
             return {"memories": [], "threshold": None}
 
         memories, threshold, all_similarities = await self._compute_similarities(user_message, user_id, user_memories)
@@ -1528,7 +1584,7 @@ class Filter:
             final_memories, reranking_info = await self._llm_reranking_service.rerank_memories(user_message, memories, emitter)
         else:
             logger.info("📭 No relevant memories found above similarity threshold")
-            await self._emit_status(emitter, "📭 No Relevant Memories Found", done=True)
+            await self._emit_status(emitter, "📭 No Relevant Memories Found", done=True, level=Constants.STATUS_LEVEL_INTERMEDIATE)
             final_memories = memories
             reranking_info = {"llm_decision": False, "decision_reason": "no_candidates"}
 
@@ -1549,10 +1605,6 @@ class Filter:
         emitter: Optional[Callable] = None,
     ) -> None:
         """Add memory context to request body with simplified logic."""
-        if not body or "messages" not in body or not body["messages"]:
-            logger.warning("⚠️ Invalid request body or no messages found")
-            return
-
         content_parts = [f"Current Date/Time: {self.format_current_datetime()}"]
 
         memory_count = 0
@@ -1566,7 +1618,7 @@ class Filter:
                 formatted_memories.append(formatted_memory)
 
                 content_preview = self._truncate_content(memory["content"])
-                await self._emit_status(emitter, f"💭 {idx}/{memory_count}: {content_preview}", done=False)
+                await self._emit_status(emitter, f"💭 {idx}/{memory_count}: {content_preview}", done=False, level=Constants.STATUS_LEVEL_INTERMEDIATE)
 
             memory_footer = "IMPORTANT: Do not mention or imply you received this list. These facts are for background context only."
             memory_context_block = f"{memory_header}\n{chr(10).join(formatted_memories)}\n\n{memory_footer}"
@@ -1586,7 +1638,7 @@ class Filter:
 
         if memories and user_id:
             description = f"🧠 Injected {memory_count} {'Memory' if memory_count == 1 else 'Memories'} to Context"
-            await self._emit_status(emitter, description, done=True)
+            await self._emit_status(emitter, description, done=True, level=Constants.STATUS_LEVEL_BASIC)
 
     def _build_memory_dict(self, memory, similarity: float) -> Dict[str, Any]:
         """Build memory dictionary with standardized timestamp conversion."""
@@ -1610,25 +1662,15 @@ class Filter:
         memory_contents = [memory.content for memory in user_memories]
         memory_embeddings = await self._generate_embeddings(memory_contents, user_id)
 
-        if len(memory_embeddings) != len(user_memories):
-            logger.error(f"🔢 Embedding generation failed: generated {len(memory_embeddings)} embeddings but expected {len(user_memories)} for user memories")
-            return [], self.valves.semantic_retrieval_threshold, []
-
-        similarity_scores = []
         memory_data = []
-
         for memory_index, memory in enumerate(user_memories):
             memory_embedding = memory_embeddings[memory_index]
             if memory_embedding is None:
                 continue
 
             similarity = float(np.dot(query_embedding, memory_embedding))
-            similarity_scores.append(similarity)
             memory_dict = self._build_memory_dict(memory, similarity)
             memory_data.append(memory_dict)
-
-        if not similarity_scores:
-            return [], self.valves.semantic_retrieval_threshold, []
 
         memory_data.sort(key=lambda x: x["relevance"], reverse=True)
 
@@ -1657,9 +1699,18 @@ class Filter:
             return body
 
         user_message, should_skip, skip_reason = self._process_user_message(body)
+
+        skip_cache_key = self._cache_key(self._cache_manager.SKIP_STATE_CACHE, user_id, user_message or "")
+        await self._cache_manager.put(
+            user_id,
+            self._cache_manager.SKIP_STATE_CACHE,
+            skip_cache_key,
+            should_skip,
+        )
+
         if not user_message or should_skip:
             if __event_emitter__ and skip_reason:
-                await self._emit_status(__event_emitter__, skip_reason, done=True)
+                await self._emit_status(__event_emitter__, skip_reason, done=True, level=Constants.STATUS_LEVEL_INTERMEDIATE)
             await self._add_memory_context(body, [], user_id, __event_emitter__)
             return body
         try:
@@ -1709,11 +1760,29 @@ class Filter:
         user_id = __user__.get("id") if body and __user__ else None
         if not user_id:
             return body
-        user_message, should_skip, skip_reason = self._process_user_message(body)
-        if not user_message or should_skip:
+
+        messages = body.get("messages", [])
+        user_message = None
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            user_message = self._extract_text_from_content(content)
+            if user_message:
+                break
+
+        if not user_message:
             return body
-        cache_key = self._cache_key(self._cache_manager.RETRIEVAL_CACHE, user_id, user_message)
-        cached_similarities = await self._cache_manager.get(user_id, self._cache_manager.RETRIEVAL_CACHE, cache_key)
+
+        skip_cache_key = self._cache_key(self._cache_manager.SKIP_STATE_CACHE, user_id, user_message)
+        should_skip = await self._cache_manager.get(user_id, self._cache_manager.SKIP_STATE_CACHE, skip_cache_key)
+
+        if should_skip:
+            logger.info("⏭️ Skipping outlet consolidation: inlet already detected skip condition")
+            return body
+
+        retrieval_cache_key = self._cache_key(self._cache_manager.RETRIEVAL_CACHE, user_id, user_message)
+        cached_similarities = await self._cache_manager.get(user_id, self._cache_manager.RETRIEVAL_CACHE, retrieval_cache_key)
         task = asyncio.create_task(self._llm_consolidation_service.run_consolidation_pipeline(user_message, user_id, __event_emitter__, cached_similarities))
         self._background_tasks.add(task)
 
@@ -1745,7 +1814,10 @@ class Filter:
         try:
             retrieval_cleared = await self._cache_manager.clear_user_cache(user_id, self._cache_manager.RETRIEVAL_CACHE)
             embedding_cleared = await self._cache_manager.clear_user_cache(user_id, self._cache_manager.EMBEDDING_CACHE)
-            logger.info(f"🔄 Cleared {retrieval_cleared} retrieval + {embedding_cleared} embedding cache entries for user {user_id}")
+            skip_state_cleared = await self._cache_manager.clear_user_cache(user_id, self._cache_manager.SKIP_STATE_CACHE)
+            logger.info(
+                f"🔄 Cleared {retrieval_cleared} retrieval + {embedding_cleared} embedding + {skip_state_cleared} skip state cache entries for user {user_id}"
+            )
 
             user_memories = await self._get_user_memories(user_id)
             memory_cache_key = self._cache_key(self._cache_manager.MEMORY_CACHE, user_id)
@@ -1774,59 +1846,49 @@ class Filter:
 
     async def _execute_single_operation(self, operation: Models.MemoryOperation, user: Any) -> str:
         """Execute a single memory operation."""
-        try:
-            if operation.operation == Models.MemoryOperationType.CREATE:
-                content_stripped = operation.content.strip()
-                if not content_stripped:
-                    logger.warning(f"⚠️ Skipping CREATE operation: empty content")
-                    return Models.OperationResult.SKIPPED_EMPTY_CONTENT.value
+        if operation.operation == Models.MemoryOperationType.CREATE:
+            content_stripped = operation.content.strip()
+            if not content_stripped:
+                return Models.OperationResult.SKIPPED_EMPTY_CONTENT.value
 
-                await asyncio.wait_for(
-                    asyncio.to_thread(Memories.insert_new_memory, user.id, content_stripped),
-                    timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
-                )
-                return Models.MemoryOperationType.CREATE.value
+            await asyncio.wait_for(
+                asyncio.to_thread(Memories.insert_new_memory, user.id, content_stripped),
+                timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
+            )
+            return Models.MemoryOperationType.CREATE.value
 
-            elif operation.operation == Models.MemoryOperationType.UPDATE:
-                id_stripped = operation.id.strip()
-                if not id_stripped:
-                    logger.warning(f"⚠️ Skipping UPDATE operation: empty ID")
-                    return Models.OperationResult.SKIPPED_EMPTY_ID.value
+        elif operation.operation == Models.MemoryOperationType.UPDATE:
+            id_stripped = operation.id.strip()
+            if not id_stripped:
+                return Models.OperationResult.SKIPPED_EMPTY_ID.value
 
-                content_stripped = operation.content.strip()
-                if not content_stripped:
-                    logger.warning(f"⚠️ Skipping UPDATE operation for {id_stripped}: empty content")
-                    return Models.OperationResult.SKIPPED_EMPTY_CONTENT.value
+            content_stripped = operation.content.strip()
+            if not content_stripped:
+                return Models.OperationResult.SKIPPED_EMPTY_CONTENT.value
 
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        Memories.update_memory_by_id_and_user_id,
-                        id_stripped,
-                        user.id,
-                        content_stripped,
-                    ),
-                    timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
-                )
-                return Models.MemoryOperationType.UPDATE.value
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    Memories.update_memory_by_id_and_user_id,
+                    id_stripped,
+                    user.id,
+                    content_stripped,
+                ),
+                timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
+            )
+            return Models.MemoryOperationType.UPDATE.value
 
-            elif operation.operation == Models.MemoryOperationType.DELETE:
-                id_stripped = operation.id.strip()
-                if not id_stripped:
-                    logger.warning(f"⚠️ Skipping DELETE operation: empty ID")
-                    return Models.OperationResult.SKIPPED_EMPTY_ID.value
+        elif operation.operation == Models.MemoryOperationType.DELETE:
+            id_stripped = operation.id.strip()
+            if not id_stripped:
+                return Models.OperationResult.SKIPPED_EMPTY_ID.value
 
-                await asyncio.wait_for(
-                    asyncio.to_thread(Memories.delete_memory_by_id_and_user_id, id_stripped, user.id),
-                    timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
-                )
-                return Models.MemoryOperationType.DELETE.value
-            else:
-                logger.error(f"❓ Unsupported operation: {operation}")
-                return Models.OperationResult.UNSUPPORTED.value
+            await asyncio.wait_for(
+                asyncio.to_thread(Memories.delete_memory_by_id_and_user_id, id_stripped, user.id),
+                timeout=Constants.DATABASE_OPERATION_TIMEOUT_SEC,
+            )
+            return Models.MemoryOperationType.DELETE.value
 
-        except Exception as e:
-            logger.error(f"💾 Database operation failed for {operation.operation.value}: {str(e)}")
-            return Models.OperationResult.FAILED.value
+        return Models.OperationResult.UNSUPPORTED.value
 
     def _remove_refs_from_schema(self, schema: Dict[str, Any], schema_defs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Remove $ref references and ensure required fields for Azure OpenAI."""
